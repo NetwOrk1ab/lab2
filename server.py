@@ -23,7 +23,7 @@ if __name__=="__main__":
         if a!=None:
             clientrdt,address = a
             break
-    clientsocket.send("b"*100)
+    clientrdt.gbn_send("b"*100)
     while True:
         try:
             time.sleep(2)

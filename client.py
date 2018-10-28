@@ -1,3 +1,4 @@
+import time
 import socket
 import rdt
 import logging
@@ -19,6 +20,12 @@ if __name__=="__main__":
     infomation = "a"*100+"b"*100
     send.gbn_send(infomation)
     send.gbn_send("abcd"*100)
+    while True:
+        time.sleep(2)
+        try:
+            print(send.gbn_recv())
+        except rdt.noinfoException:
+            pass
     #print(send.gbn_recv())
     a = 1 # it just for debug breakpoint
     #send.close()
