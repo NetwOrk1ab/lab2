@@ -4,8 +4,9 @@ import struct
 import threading
 import time
 
+SR = True
 # lab works well verify
-verify = False  # never open it when rdt is used.it just use for test.
+verify = True  # never open it when rdt is used.it just use for test.
 
 # recv should be bigger than send.
 request_connect = b"hello,i want connect"
@@ -43,6 +44,8 @@ class rdt:
         self.Lock = threading.Lock()  # this could be optimized.
         # init rdt
         self.socket.settimeout(self.timeout)
+        # optional
+        self.sr_recv = []
 
     def init_connect(self):
         try:
@@ -60,10 +63,7 @@ class rdt:
             self.socket.sendto(hand_connect, self.address)
             logging.info("send hand connect to " + str(self.address))
         self.connected = True
-        send = threading.Thread(name="send", target=self.send_thread, daemon=False)
-        send.start()
-        recv = threading.Thread(name="recv", target=self.recv_thread, daemon=False)
-        recv.start()
+        self._init_threads(self)
         logging.info("rdt connect successful with " + str(self.address))
 
     def bind(self, address):
@@ -89,10 +89,7 @@ class rdt:
             newrdt = rdt(self.socket, a1, self.configure)
             logging.info("connect successful with " + str(a1))
             newrdt.connected = True
-            send = threading.Thread(name="send", target=newrdt.send_thread, daemon=False)
-            send.start()
-            recv = threading.Thread(name="recv", target=newrdt.recv_thread, daemon=False)
-            recv.start()
+            self._init_threads(newrdt)
             return newrdt, a1
         else:
             logging.info("rdt accept failed from " + str(self.address))
@@ -165,12 +162,16 @@ class rdt:
                             else:
 
                                 # just for test
-                                logging.info("don't send ack lalalala")
+                                if self.recv_max_seq == 5:
+                                    logging.info("don't send ack lalalala")
+                                else:
+                                    self.socket.sendto(self.constructFirst(0, self.recv_max_seq), self.address)
+                                    logging.info("send ack " + str(self.recv_max_seq) + " ..... ")
                                 # if random.random()<0.7:
-                                #    self.socket.sendto(self.constructFirst(0,self.recv_max_seq),self.address)
-                                #    logging.info("send ack "+str(self.recv_max_seq)+" ..... ")
+                                #   self.socket.sendto(self.constructFirst(0,self.recv_max_seq),self.address)
+                                #   logging.info("send ack "+str(self.recv_max_seq)+" ..... ")
                                 # else :
-                                #    logging.info("random verify it works")
+                                #   logging.info("random verify it works")
                         else:
                             if self.recv_max_seq != -1:
                                 if not verify:
@@ -184,6 +185,103 @@ class rdt:
                     # send maxseq ack to host
                 except socket.timeout:
                     continue
+
+    def sr_send_thread(self):
+        # use with self.Lock: in this code
+        timers = {}
+        for i in range(self.windowSize):
+            timers[i] = 0
+        while True:
+            time.sleep(0.1)
+            with self.Lock:
+                if len(self.send_buffer) == 0:
+                    continue
+                if not self.connected:
+                    break
+                # if len(self.send_buffer)<self.windowSize or self.nextsequm-self.base == self.windowSize:
+                #    continue
+                if self.nextsequm - self.base < len(self.send_buffer) and self.nextsequm < self.base + self.windowSize:
+                    logging.info(
+                        "sending chunk data " + str(self.send_buffer[self.nextsequm - self.base]) + " to " + str(
+                            self.address))
+                    self.socket.sendto(self.send_buffer[self.nextsequm - self.base], self.address)
+                    # Recycle the serial number
+                    if self.nextsequm == 0x7f:
+                        self.nextsequm = 0
+                    else:
+                        self.nextsequm += 1
+                # timer setting
+                for i in range(self.nextsequm - self.base):
+                    if i + self.base not in self.sr_recv:
+                        timers[i] += 1
+                        if timers[i] > self.rdt_timeoutStep:
+                            self.socket.sendto(self.send_buffer[i], self.address)
+                            logging.info("timeout and resend " + str(self.send_buffer[i]) + " to " + str(self.address))
+                            timers[i] = 0
+
+                # self.base renew ,self.sr_recv = [] it is a seq ack recv list
+                offset = 0
+                while self.base + offset in self.sr_recv:
+                    offset += 1
+                self.base += offset
+                # renew send buffer
+                self.send_buffer = self.send_buffer[offset:]
+                # update timers
+                for i in range(self.windowSize):
+                    if i + offset < self.windowSize:
+                        timers[i] = timers[i + offset]
+                    else:
+                        timers[i] = 0
+                # update sr_recvs reduce
+                for i in self.sr_recv:
+                    if i < self.base:
+                        self.sr_recv.remove(i)
+
+    def sr_recv_thread(self):
+        sr_base = 0
+        sr_tmp_buffers = {}
+        while True:
+            time.sleep(0.1)
+            with self.Lock:
+                try:
+                    data, address = self.socket.recvfrom(1000)
+                    logging.info("recv " + str(data) + " from " + str(address))
+                    first_byte = data[:1]
+                    type, seq = self.parseFirstByte(first_byte)
+                    if type == 0:  # a ack_type
+                        logging.info("receive ack " + str(seq))
+                        if seq not in self.sr_recv:
+                            self.sr_recv.append(seq)
+                    else:
+                        if seq < sr_base + self.windowSize:
+                            if not verify:
+                                self.socket.sendto(self.constructSecond(0, seq), self.address)
+                                logging.info("send ack " + str(seq) + " to " + str(self.address))
+                            else:
+                                if not seq == 2:
+                                    self.socket.sendto(self.constructSecond(0, seq), self.address)
+                                    logging.info("send ack " + str(seq) + " to " + str(self.address))
+                        if seq >= sr_base and seq < sr_base + self.windowSize:
+                            if seq not in sr_tmp_buffers:
+                                sr_tmp_buffers[seq] = data
+                        offset = 0
+                        while sr_base + offset in sr_tmp_buffers:
+                            self.recv_buffer.append(sr_tmp_buffers[sr_base + offset])
+                            offset += 1
+                        for i in range(offset):
+                            del sr_tmp_buffers[sr_base + i]
+                        sr_base += offset
+
+                        # lengthbyte = dataFrame[:1]
+                        # final,length = self.parseSecondByte(lengthbyte)
+
+                    # if it's a ack then read seq and renew maxack
+                    # else it is a data, read all 1+100 bytes and store to recv_buffer
+                    # ,judge seq is right or not, if right,store to buffer
+                    # send maxseq ack to host
+                except socket.timeout:
+                    continue
+
 
     def parseSecondByte(self, second):
         secondInt, = struct.unpack("!B", second)
@@ -218,7 +316,10 @@ class rdt:
                 final_buffer_seq = self.base
             else:
                 type, seq = self.parseFirstByte(self.send_buffer[-1][:1])
-                final_buffer_seq = seq + 1
+                if seq == 0x7f:
+                    final_buffer_seq = 0
+                else:
+                    final_buffer_seq = seq + 1
             for i in range(max_group_number):
                 firstchunk = self.constructFirst(1, final_buffer_seq + i)
                 if i == max_group_number - 1:  # the last chunk
@@ -253,3 +354,15 @@ class rdt:
                     buffer += self.recv_buffer[i][2:102]
             self.recv_buffer = self.recv_buffer[packet_number:]
             return buffer.decode()
+
+    def _init_threads(self, newrdt):
+        if not SR:
+            send = threading.Thread(name="send", target=newrdt.send_thread, daemon=False)
+        else:
+            send = threading.Thread(name="send", target=newrdt.sr_send_thread, daemon=False)
+        if not SR:
+            recv = threading.Thread(name="recv", target=newrdt.recv_thread, daemon=False)
+        else:
+            recv = threading.Thread(name="recv", target=newrdt.sr_recv_thread, daemon=False)
+        send.start()
+        recv.start()

@@ -17,8 +17,7 @@ if __name__ == "__main__":
     remote_server_address = (server_host, server_port)
     send = rdt.rdt(clientsocket, remote_server_address, config)
     send.init_connect()
-    infomation = "a" * 100 + "b" * 100
-    send.gbn_send(infomation)
+    send.gbn_send("a" * 10 + "b" * 100)
     send.gbn_send("abcd" * 100)
     while True:
         time.sleep(2)
